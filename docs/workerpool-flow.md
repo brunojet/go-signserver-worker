@@ -13,36 +13,33 @@ graph TD
         C4[Worker 4]
         C5[Worker 5]
     end
-    subgraph Resultados
-        D[resultChan canal]
-        E[handleResults]
-        F[Reenfileirar evento se falha]
-        G[Remover do pending se sucesso]
+    subgraph Pós-processamento
+        D1[Delete da fila - sucesso]
+        D2[Log de erro - falha]
     end
 
-    A -->|feedJobs| B
+    A -->|Feeder envia| B
     B --> C1
     B --> C2
     B --> C3
     B --> C4
     B --> C5
-    C1 -->|processResult| D
-    C2 -->|processResult| D
-    C3 -->|processResult| D
-    C4 -->|processResult| D
-    C5 -->|processResult| D
-    D --> E
-    E -->|Sucesso| G
-    E -->|Falha| F
-    F -->|Reenfileira no jobs| B
-    G -->|Remove do pending| E
+    C1 -->|Sucesso| D1
+    C2 -->|Sucesso| D1
+    C3 -->|Sucesso| D1
+    C4 -->|Sucesso| D1
+    C5 -->|Sucesso| D1
+    C1 -->|Falha| D2
+    C2 -->|Falha| D2
+    C3 -->|Falha| D2
+    C4 -->|Falha| D2
+    C5 -->|Falha| D2
 ```
 
 ## Descrição
-- **feedJobs**: Alimenta o canal jobs com os eventos recebidos.
-- **Workers**: Até 5 workers processam eventos em paralelo, retirando do canal jobs.
-- **processResult**: Cada worker envia o resultado para o canal resultChan.
-- **handleResults**: Consome resultados, remove do pending se sucesso, ou reenfileira no jobs se falha.
-- O ciclo se repete até pending ficar vazio.
+- **Feeder**: Alimenta o canal jobs com os eventos recebidos da fila (SQS, Azure, etc).
+- **Workers**: Até N workers processam eventos em paralelo, retirando do canal jobs.
+- **Processamento**: Cada worker processa o job. Se sucesso, remove da fila (DeleteMessage). Se falha, apenas loga o erro.
+- **Shutdown**: O canal jobs é fechado pelo feeder ao receber sinal externo/contexto, encerrando os workers de forma limpa.
 
-> Observação: O Mermaid pode apresentar problemas com parênteses em rótulos. Por isso, utilizei "canal" ao invés de "(canal)" nos nós jobs e resultChan.
+> Observação: O reenfileiramento automático e o controle de "pending" não fazem mais parte do fluxo do WorkerPool. Se necessário, devem ser tratados pela infraestrutura da fila ou lógica externa.

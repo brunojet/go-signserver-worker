@@ -2,23 +2,14 @@
 package sqs
 
 import (
-	"fmt"
+	"context"
 	"log"
-	"math/rand"
 	"sync"
 	"time"
+
+	"github.com/brunojet/go-signserver-worker/worker"
+	// Ajuste o caminho do import conforme necessário
 )
-
-// logWithID imprime logs com um identificador de contexto
-func logWithID(id string, format string, v ...interface{}) {
-	msg := fmt.Sprintf(format, v...)
-	log.Printf("[ID:%s] %s", id, msg)
-}
-
-// generateEventID gera um identificador único para cada evento
-func generateEventID() string {
-	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), rand.Intn(10000))
-}
 
 var (
 	successCount int
@@ -30,31 +21,37 @@ var (
 func pollEventStatus(eventID string, logID string) bool {
 	// Simula polling: 2 sucessos, 1 falha
 	successCount++
-	defer logWithID(logID, "[FAKE] Fim do processo de polling para o evento.")
+	defer log.Printf("[Worker %s] [FAKE] Fim do processo de polling para o evento.", logID)
 	if successCount%3 == 0 {
 		time.Sleep(1 * time.Second)
-		logWithID(logID, "[FAKE] Polling falhou: simulação de erro no status")
+		log.Printf("[Worker %s] [FAKE] Polling falhou: simulação de erro no status", logID)
 		return false
 	}
 	for i := 0; i < 3; i++ {
 		time.Sleep(500 * time.Millisecond)
-		logWithID(logID, "[FAKE] Status do evento (tentativa %d): PROCESSING", i+1)
+		log.Printf("[Worker %s] [FAKE] Status do evento (tentativa %d): PROCESSING", logID, i+1)
 	}
-	logWithID(logID, "[FAKE] Processamento do evento concluído!")
+	log.Printf("[Worker %s] [FAKE] Processamento do evento concluído!", logID)
 	return true
 }
 
 // processEvent envia o evento para um servidor externo de forma assíncrona (simulação fake)
-func processEvent(evento string, logID string) bool {
+func processEvent(evento any, logID string) bool {
+	// Type assertion para string (ajuste conforme o tipo real)
+	_, ok := evento.(string)
+	if !ok {
+		log.Printf("[Worker %s] Tipo de evento inválido: %T", logID, evento)
+		return false
+	}
 	// Simula sucesso/falha alternados: 2 sucessos, 1 falha
 	successCount++
 	if successCount%3 == 0 {
 		time.Sleep(1 * time.Second)
-		logWithID(logID, "[FAKE] Erro ao enviar evento: simulação de falha")
+		log.Printf("[Worker %s] [FAKE] Erro ao enviar evento: simulação de falha", logID)
 		return false
 	}
 	time.Sleep(1 * time.Second)
-	logWithID(logID, "[FAKE] Evento enviado com sucesso.")
+	log.Printf("[Worker %s] [FAKE] Evento enviado com sucesso.", logID)
 
 	// Supondo que o ID do evento venha na resposta (simulação)
 	eventID := logID // Usa o logID como ID fake
@@ -62,50 +59,44 @@ func processEvent(evento string, logID string) bool {
 	return pollEventStatus(eventID, logID)
 }
 
-// Estrutura para resultado do processamento
-type processResult struct {
-	evento  string
-	success bool
+// Implementação fake de MessageQueue para testes
+// (poderia ser movida para um arquivo de teste)
+type FakeQueue struct {
+	msgs []any
+	mu   sync.Mutex
 }
 
-// workerProcess executa o processamento de eventos
-func workerProcess(workerID int, jobs <-chan string, resultChan chan<- processResult) {
-	for ev := range jobs {
-		logID := generateEventID()
-		logWithID(logID, "[Worker %d] Evento recebido: %s", workerID+1, ev)
-		success := processEvent(ev, logID)
-		resultChan <- processResult{ev, success}
+func (q *FakeQueue) ReceiveMessages(max int) ([]any, error) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.msgs) == 0 {
+		return nil, nil
 	}
-}
-
-// feedJobs adiciona eventos ao canal jobs e ao mapa de pendências
-func feedJobs(eventos []string, jobs chan<- string, pending map[string]bool) {
-	for _, ev := range eventos {
-		jobs <- ev
-		pending[ev] = true
+	if max <= 0 {
+		return nil, nil
 	}
-}
-
-// handleResults gerencia os resultados dos workers, removendo eventos concluídos e reenfileirando falhas
-func handleResults(resultChan <-chan processResult, jobs chan<- string, pending map[string]bool, mu *sync.Mutex) {
-	for len(pending) > 0 {
-		res := <-resultChan
-		if res.success {
-			mu.Lock()
-			delete(pending, res.evento)
-			mu.Unlock()
-		} else {
-			logWithID(generateEventID(), "Evento falhou, será reprocessado na próxima tentativa.")
-			go func(ev string) { jobs <- ev }(res.evento)
-		}
+	var batch []any
+	if len(q.msgs) > max {
+		batch = q.msgs[:max]
+		q.msgs = q.msgs[max:]
+	} else {
+		batch = q.msgs
+		q.msgs = nil
 	}
+	return batch, nil
 }
 
-// StartQueueMonitor inicia o monitoramento da fila SQS
-func StartQueueMonitor() {
+func (q *FakeQueue) DeleteMessage(msg any) error {
+	// Simula remoção (não faz nada)
+	return nil
+}
+
+// StartQueueMonitor inicia o monitoramento da fila SQS (usando workerpool genérico)
+// Agora aceita context.Context para shutdown limpo
+func StartQueueMonitor(ctx context.Context) {
 	log.Println("Monitorando fila SQS...")
 	const maxParallel = 5
-	eventos := []string{
+	eventos := []any{
 		`{"Records":[{"s3":{"bucket":{"name":"meu-bucket"},"object":{"key":"caminho/arquivo1.txt"}}}]}`,
 		`{"Records":[{"s3":{"bucket":{"name":"meu-bucket"},"object":{"key":"caminho/arquivo2.txt"}}}]}`,
 		`{"Records":[{"s3":{"bucket":{"name":"meu-bucket"},"object":{"key":"caminho/arquivo3.txt"}}}]}`,
@@ -113,18 +104,15 @@ func StartQueueMonitor() {
 		`{"Records":[{"s3":{"bucket":{"name":"meu-bucket"},"object":{"key":"caminho/arquivo5.txt"}}}]}`,
 		`{"Records":[{"s3":{"bucket":{"name":"meu-bucket"},"object":{"key":"caminho/arquivo6.txt"}}}]}`,
 	}
-	jobs := make(chan string, len(eventos))
-	var mu sync.Mutex
-	pending := make(map[string]bool)
-	resultChan := make(chan processResult)
+	fakeQueue := &FakeQueue{msgs: eventos}
 
-	feedJobs(eventos, jobs, pending)
-
-	for w := 0; w < maxParallel; w++ {
-		go workerProcess(w, jobs, resultChan)
+	cfg := worker.WorkerPoolConfig{
+		Queue:      fakeQueue,
+		NumWorkers: maxParallel,
+		Process:    processEvent,
 	}
 
-	handleResults(resultChan, jobs, pending, &mu)
+	worker.WorkerPool(ctx, cfg)
 
-	log.Println("Todos os eventos foram processados.")
+	log.Println("Todos os eventos foram processados ou shutdown externo recebido.")
 }
